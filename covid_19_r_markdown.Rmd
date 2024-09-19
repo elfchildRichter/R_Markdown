@@ -1,0 +1,402 @@
+---
+title: "COVID 19 R Markdown"
+# author: "Li-Ru Hong"
+# date: "2024-09-17"
+output:
+  html_document: default
+  pdf_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+<bar>
+
+# Introduce
+
+Data from the [Johns Hopkins GitHub site](https://github.com/CSSEGISandData/COVID-19/tree/master/csse_covid_19_data/csse_covid_19_time_series) was used. After processing and merging the global cases and global deaths data, 330,327 records were obtained, with five features extracted: Province_State, Country_Region, date, cases, and deaths, covering the period from January 22, 2020, to March 9, 2023.
+
+For the US data, after processing and merging US cases and US deaths, 3,819,906 records were obtained, with seven features extracted for analysis: Admin2, Province_State, Country_Region, date, cases, population, and deaths.
+
+After data processing, linear regression was used to explore the relationship between cases per thousand and deaths per thousand.
+
+
+### Libraries
+```{r libraries}
+library(stringr)
+library(tidyverse)
+library(lubridate)
+library(ggplot2)
+library(scales)
+library(dplyr)
+```
+
+
+# Data Anaylsis
+
+### Import Data
+```{r urls}
+url_in <- "https://raw.githubusercontent.com/CSSEGISandData/COVID-19/master/csse_covid_19_data/csse_covid_19_time_series/"
+file_name <- c("time_series_covid19_confirmed_US.csv",  
+               "time_series_covid19_confirmed_global.csv", 
+               "time_series_covid19_deaths_US.csv",  
+               "time_series_covid19_deaths_global.csv")
+urls <- str_c(url_in, file_name)
+urls
+```
+
+```{r data}
+us_cases <- read.csv(urls[1])
+global_cases <- read.csv(urls[2])
+us_deaths <- read.csv(urls[3])
+global_deaths <- read.csv(urls[4])
+```
+
+## Global Data
+
+### Global Cases
+```{r global cases}
+global_cases <- global_cases %>%
+                pivot_longer(cols = starts_with('X'), 
+                             names_to = 'date',         
+                             values_to = 'cases') %>%   
+                mutate(date = as.Date(date, format = "X%m.%d.%y")) %>%
+                rename(Province_State = 'Province.State', 
+                       Country_Region = 'Country.Region') %>%
+                select(-c(Lat, Long)) 
+global_cases
+```
+
+### Global Deaths
+```{r global deaths}
+global_deaths <- global_deaths %>%
+                pivot_longer(cols = starts_with('X'), 
+                             names_to = 'date',         
+                             values_to = 'cases') %>%   
+                mutate(date = as.Date(date, format = "X%m.%d.%y")) %>%
+                rename(Province_State = 'Province.State', 
+                       Country_Region = 'Country.Region', 
+                       deaths = 'cases') %>%
+                select(-c(Lat, Long)) 
+global_deaths
+```
+
+### Global
+```{r global}
+global <- global_cases %>%
+          full_join(global_deaths, 
+                    by=c('Province_State', 'Country_Region', 'date'))
+global
+
+summary(global)
+
+# cols <- c("Province_State", "Country_Region")
+# for (col in cols){
+#   cat('Counts for each category in column:', col, '\n')
+#   print(table(global[[col]]))
+#   cat('\n')
+# }
+
+unique(global$Country_Region)
+unique(global$Province_State)
+```
+
+
+### Global Totals
+```{r global totals}
+global_totals <- global %>%
+                 group_by(Country_Region) %>%
+                 filter(date == max(date)) %>%
+                 mutate(death_perc = 100 * deaths / cases) %>%
+                 ungroup()
+top_20_countries <- global_totals %>%
+                    arrange(desc(deaths)) %>%
+                    head(20)
+
+ggplot(top_20_countries, aes(x = reorder(Country_Region, -deaths))) +
+  geom_bar(aes(y = cases, fill = "Cases"), stat = "identity", position = "dodge") +
+  geom_bar(aes(y = deaths, fill = "Deaths"), stat = "identity", position = "dodge") +
+  scale_y_log10() + 
+  labs(title = "Total Cases and Deaths by Country_Region",
+       x = "Country",
+       y = "Count (log scale)") +
+  scale_fill_manual(values = c("Cases" = "steelblue", "Deaths" = "darkred")) +
+  theme(legend.position = 'top', axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+Ranking of countries with the highest total deaths: US, Brazil, India, Russia, Mexico, UK...
+
+
+## US Data
+
+### US Cases
+```{r us cases}
+us_cases <- us_cases %>%
+            pivot_longer(cols = starts_with('X'), 
+                         names_to = 'date',         
+                         values_to = 'cases') %>%   
+            mutate(date = as.Date(date, format = "X%m.%d.%y")) %>%
+            select(-c(Lat, Long_, UID, iso2,  iso3, code3, FIPS, Combined_Key)) 
+us_cases
+```
+
+### US Deaths
+```{r us deaths}
+us_deaths <- us_deaths %>%
+            pivot_longer(cols = starts_with('X'), 
+                         names_to = 'date',         
+                         values_to = 'cases') %>%   
+            mutate(date = as.Date(date, format = "X%m.%d.%y")) %>%
+            rename(deaths = 'cases') %>%
+            select(-c(Lat, Long_, UID, iso2,  iso3, code3, FIPS, Combined_Key)) 
+us_deaths
+```
+
+### US
+```{r us}
+us <- us_cases %>%
+      full_join(us_deaths, 
+                by=c('Province_State', 'Country_Region', 'Admin2', 'date')) %>%
+      filter(!is.na(cases) & !is.na(deaths)) 
+us
+
+summary(us)
+
+neg_rows <- us %>%
+            filter(cases<0 | deaths<0)
+
+# rows with cases or deaths < 0
+print(neg_rows)
+
+us <- us %>%
+      filter(cases >=0, deaths>=0)
+
+summary(us)
+```
+
+Three records have negative values for cases and deaths, which are likely input errors. Since there are only three recoreds, I have removed them.
+
+
+### US by State
+```{r us by state}
+us_by_state <- us %>%
+              group_by(Province_State, Country_Region, date) %>%
+              summarize(cases = sum(cases), 
+                        deaths = sum(deaths), 
+                        population = sum(Population)) %>%
+              mutate(deaths_per_mill = deaths * 1000000 / population) %>%
+              select(Province_State, Country_Region, date, cases, deaths, deaths_per_mill, population) %>%
+              ungroup() %>%
+              arrange(Country_Region, Province_State, date) %>%
+              mutate(new_cases = cases - lag(cases), 
+                     new_deaths = deaths - lag(deaths))
+us_by_state
+tail(us_by_state)
+unique(us$Country_Region)
+
+state_sum <- us_by_state %>%
+              group_by(Province_State) %>%
+              filter(date == max(date)) %>%
+              ungroup() %>%
+              mutate(population = ifelse(population == 0, cases, population),
+                     death_perc = 100 * deaths / cases,
+                     cases_per_thou = 1000 * cases / population,
+                     deaths_per_thou = 1000 * deaths / population)
+dp <- state_sum %>%
+      filter(Province_State == 'Diamond Princess')
+dp
+
+state_sum <- state_sum %>%
+             mutate(cases = ifelse(cases < 1, 1, cases),
+                    deaths = ifelse(deaths < 1, 1, deaths)) 
+# summary(state_sum)
+
+state_sum %>%
+arrange(cases_per_thou) %>%
+select(deaths_per_thou, cases_per_thou, Province_State, deaths, cases, population)
+
+
+# the ten smallest for cases_per_thou
+state_sum %>%
+  slice_min(cases_per_thou, n = 10) %>%
+  select(deaths_per_thou, cases_per_thou, Province_State, deaths, cases, population)
+
+# the ten biggest for cases_per_thou
+state_sum %>%
+  slice_max(cases_per_thou, n = 10) %>%
+  select(deaths_per_thou, cases_per_thou, Province_State, deaths, cases, population)
+
+  
+ggplot(state_sum, aes(x = reorder(Province_State, -cases), y = cases)) +
+  geom_bar(stat = "identity", fill = "steelblue") +
+  theme_minimal() +
+  labs(title = "Total Cases by Province_State",
+       x = "Province/State",
+       y = "Total Cases") +
+  theme(legend.position = 'top', axis.text.x = element_text(angle=45, hjust=1, size=7))
+
+ggplot(state_sum, aes(x = reorder(Province_State, -deaths), y = deaths)) +
+  geom_bar(stat = "identity", fill = "darkred") +
+  theme_minimal() +
+  labs(title = "Total Deaths by Province_State",
+       x = "Province/State",
+       y = "Total Deaths") +
+  theme(legend.position = 'top', axis.text.x = element_text(angle=45, hjust=1, size=7))
+
+ggplot(state_sum, aes(x = reorder(Province_State, -cases))) +
+  geom_bar(aes(y = cases, fill = "Cases"), stat = "identity", position = "dodge") +
+  geom_bar(aes(y = deaths, fill = "Deaths"), stat = "identity", position = "dodge") +
+  scale_y_log10() + 
+  labs(title = "Total Cases and Deaths by Province_State",
+       x = "Province/State",
+       y = "Count (log scale)") +
+  scale_fill_manual(values = c("Cases" = "steelblue", "Deaths" = "darkred")) +
+  theme(legend.position = 'top', axis.text.x = element_text(angle=45, hjust=1, size=7))
+
+
+```
+
+The number of deaths for the Diamond Princess is 0, which causes issues when converting to a log10 scale. Therefore, if the values for cases or deaths are less than 1, they are adjusted to 1. Additionally, the population for the Diamond Princess is recorded as 0, but there are 49 cases; hence, if the population is zero, it is set to the number of cases.
+
+
+### US Totals
+```{r us totals}
+us_totals <- us_by_state %>%
+              group_by(Country_Region, date) %>%
+              summarize(cases = sum(cases), 
+                        deaths = sum(deaths), 
+                        population = sum(population)) %>%
+              mutate(deaths_per_mill = deaths * 1000000 / population) %>%
+              select(Country_Region, date, cases, deaths, deaths_per_mill, population) %>%
+              ungroup() %>%
+              arrange(Country_Region, date) %>%
+              mutate(new_cases = cases - lag(cases), 
+                     new_deaths = deaths - lag(deaths))
+us_totals
+tail(us_totals %>% select(new_cases, new_deaths, everything()))
+# max(us_totals$date)
+# max(us_totals$deaths)
+# min(us_totals$deaths)
+summary(us_totals)
+
+us_totals_non0 <- us_totals %>%
+                  filter(cases > 0)
+ggplot(us_totals_non0, aes(x = date)) +
+  geom_bar(aes(y = cases, fill = "Cases"), stat = "identity", position = "dodge") +
+  geom_bar(aes(y = deaths, fill = "Deaths"), stat = "identity", position = "dodge", alpha = 0.5) +
+  labs(title = "Cases and Deaths in US", x = "Date", y = "Count (log scale)") +
+  scale_y_log10() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  scale_fill_manual(values = c("Cases" = "steelblue", "Deaths" = "darkred")) +
+  theme(legend.position = 'top')
+```
+
+
+### Problematic Rows
+```{r problematic rows}
+problematic_rows <- us_totals %>%
+                    filter(is.nan(new_cases) | is.nan(new_deaths) | 
+                    is.na(new_cases) | is.na(new_deaths) |
+                    is.infinite(new_cases) | is.infinite(new_deaths)) %>%
+                    select(new_cases, new_deaths, everything())
+print(problematic_rows)
+```
+
+When calculating new cases and new deaths, the value from the previous day needs to be subtracted. However, since there is no prior day's  value for the first day, this results in NA. This is removed before continuing.
+
+
+### New Cases, New Deaths, Percentage
+
+```{r us totals new}
+us_totals_non0  <- us_totals_non0  %>%
+                   filter(date != as.Date("2020-01-22")) %>%
+                   mutate(death_perc = (new_deaths/new_cases)*100)
+
+ggplot(us_totals_non0, aes(x = date, y = new_cases)) +
+  geom_line(color = "steelblue") +
+  labs(title = 'COVID 19 New Cases in US', y = 'Number of New Cases') 
+
+ggplot(us_totals_non0, aes(x = date, y = new_deaths)) +
+  geom_line(color = "darkred") +
+  labs(title = 'COVID 19 New Deaths in US', y = 'Number of New Deaths') 
+
+ggplot(us_totals_non0, aes(x = date, y = death_perc)) +
+  geom_line(color = "darkgreen") +
+  labs(title = 'COVID 19 Death Percentage', y = 'Death Percentage (%)') 
+
+```
+
+From the plots, it can be observed that new cases and deaths in winter are significantly higher compared to other seasons, indicating an increase in infections and fatalities during this period. 
+
+However, the peak mortality rates tend to occur more frequently during seasonal transitions, rather than in winter.
+
+
+### New York
+```{r new york}
+state <- 'New York'
+
+us_by_state %>%
+filter(Province_State == state, cases > 0) %>%
+ggplot(aes(x = date)) +
+  geom_line(aes(y = cases, color = 'cases')) +  
+  geom_point(aes(y = cases, color = 'cases')) + 
+  geom_line(aes(y = deaths, color = 'deaths')) + 
+  geom_point(aes(y = deaths, color = 'deaths')) +
+  scale_y_log10() +
+  scale_color_manual(values = c('cases' = 'steelblue', 'deaths' = 'darkred')) +
+  theme(legend.position = 'top') +
+  labs(title = str_c('Cases and Deaths in ', state), y = 'Number of Cases/Deaths (log scale)')
+```
+
+
+# Model
+
+### Linear Regression
+```{r lm}
+mod <- lm(deaths_per_thou ~ cases_per_thou, data = state_sum)
+summary(mod)
+```
+
+The intercept suggests that when cases_per_thou is 0, the predicted deaths_per_thou would be -1.742, but with a P-value of 0.0888, this is not statistically significant.
+
+For each 1 increase in cases_per_thou, the predicted deaths_per_thou increases by 0.015854. With a P-value of 5.53e−07, this coefficient is highly statistically significant, indicating a strong positive impact of cases on deaths.
+
+An R-squared value of 0.3633 means that the model explains 36.33% of the variance, indicating a moderate fit to the data. While the relationship is not perfectly linear, there is some correlation.
+
+
+### Prediction
+```{r pred}
+state_pred <- state_sum %>%
+              mutate(pred = predict(mod))
+state_pred
+
+ggplot(state_pred) +
+  geom_point(aes(x = cases_per_thou, y = deaths_per_thou, color = "Actual Deaths")) +
+  geom_point(aes(x = cases_per_thou, y = pred, color = "Predicted Deaths")) +
+  coord_cartesian(xlim = c(150, 450), ylim = c(0, 6)) +
+  labs(title = 'Deaths vs Cases', x = 'Cases per Thousand', y = 'Deaths per Thousand') +
+  scale_color_manual(values = c("Actual Deaths" = "steelblue", "Predicted Deaths" = "darkgreen")) +
+  theme(legend.position = "top")
+```
+
+
+# Brief Summary
+
+
+- Global data records include 201 countries and 91 states/cities, with the highest recorded cases at 103,802,702 and the highest deaths at 1,123,836.
+
+- The top ten countries with the highest total deaths are the US, Brazil, India, Russia, Mexico, UK, Peru, Italy, Germany, and France.
+
+- New cases and deaths in winter are significantly higher compared to other seasons, indicating an increase in infections and fatalities during this period. However, the peak mortality rates tend to occur more frequently during seasonal transitions, rather than in winter.
+
+- For every increase of 1 in cases per thousand, the predicted deaths per thousand increase by 0.015854. With a P-value of 5.53e−07, this shows a significant positive impact of case counts on death rates.
+
+- In this model, potential sources of bias could include the exclusion of important variables, the influence of data outliers on the fit, or the use of an unsuitable model, as the relationship may not be purely linear.
+
+- Further modeling approaches could be explored.
+
+<br>
+
+
+
