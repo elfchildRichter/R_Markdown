@@ -1,0 +1,506 @@
+---
+title: "NYPD Shooting Incident Data Report"
+author: "Li-Ru Hong"
+date: "2024-09-13"
+output:
+  html_document:
+  pdf_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+<br>
+
+## Introduce
+
+This report is for a CU Boulder MSDS course assignment. It analyzes the NYPD Shooting Incident data (from [DATA.GOV](https://catalog.data.gov/dataset)), which includes 28,562 records and 21 features of incidents in New York City from 2006 to 2023. The target is whether the case is classified as a murder (STATISTICAL_MURDER_FLAG), and baseline models using decision tree, random forest, and xgboost are built.
+
+<br>
+
+**Project Step 1: Start an Rmd Document** <br> Start an Rmd document that describes and imports the shooting project dataset in a reproducible manner.
+
+<br>
+
+### Libraries
+
+```{r libraries, results='hide'}
+library(ggplot2)
+library(dplyr)
+library(tidyverse)
+library(caret)
+library(ROSE)
+library(rpart)
+library(randomForest)
+library(xgboost)
+library(pROC)
+```
+
+## Data
+
+```{r data import}
+data <- read.csv("https://data.cityofnewyork.us/api/views/833y-fsy8/rows.csv?accessType=DOWNLOAD", stringsAsFactors = FALSE)
+colnames(data)
+head(data)
+```
+
+| Column Name             | Description                                                                                                                      | API Field Name          | Data Type          |
+|----------------|------------------------|----------------|----------------|
+| INCIDENT_KEY            | Randomly generated persistent ID for each arrest                                                                                 | incident_key            | Text               |
+| OCCUR_DATE              | Exact date of the shooting incident                                                                                              | occur_date              | Floating Timestamp |
+| OCCUR_TIME              | Exact time of the shooting incident                                                                                              | occur_time              | Text               |
+| BORO                    | Borough where the shooting incident occurred                                                                                     | boro                    | Text               |
+| LOC_OF_OCCUR_DESC       | Description of the location where the shooting occurred                                                                          | loc_of_occur_desc       | Text               |
+| PRECINCT                | Precinct where the shooting incident occurred                                                                                    | precinct                | Number             |
+| JURISDICTION_CODE       | Jurisdiction where the shooting incident occurred. Codes 0(Patrol), 1(Transit), 2(Housing) represent NYPD, codes 3+ are non-NYPD | jurisdiction_code       | Number             |
+| LOC_CLASSFCTN_DESC      | Classification description of the location where the shooting occurred                                                           | loc_classfctn_desc      | Text               |
+| LOCATION_DESC           | Location of the shooting incident                                                                                                | location_desc           | Text               |
+| STATISTICAL_MURDER_FLAG | Shooting resulted in the victim’s death which would be counted as a murder                                                       | statistical_murder_flag | Checkbox           |
+| PERP_AGE_GROUP          | Perpetrator’s age within a category                                                                                              | perp_age_group          | Text               |
+| PERP_SEX                | Perpetrator’s sex description                                                                                                    | perp_sex                | Text               |
+| PERP_RACE               | Perpetrator’s race description                                                                                                   | perp_race               | Text               |
+| VIC_AGE_GROUP           | Victim’s age within a category                                                                                                   | vic_age_group           | Text               |
+| VIC_SEX                 | Victim’s sex description                                                                                                         | vic_sex                 | Text               |
+| VIC_RACE                | Victim’s race description                                                                                                        | vic_race                | Text               |
+| X_COORD_CD              | Midblock X-coordinate for New York State Plane Coordinate System, Long Island Zone, NAD 83, units feet (FIPS 3104)               | x_coord_cd              | Text               |
+| Y_COORD_CD              | Midblock Y-coordinate for New York State Plane Coordinate System, Long Island Zone, NAD 83, units feet (FIPS 3104)               | y_coord_cd              | Text               |
+| Latitude                | Latitude coordinate for Global Coordinate System, WGS 1984, decimal degrees (EPSG 4326)                                          | latitude                | Number             |
+| Longitude               | Longitude coordinate for Global Coordinate System, WGS 1984, decimal degrees (EPSG 4326)                                         | longitude               | Number             |
+| Lon_Lat                 | Longitude and Latitude Coordinates for mapping                                                                                   | geocoded_column         | Point              |
+
+```{r data summary}
+summary(data)
+```
+
+<br>
+
+**Project Step 2: Tidy and Transform Your Data** <br> Add to your Rmd document a summary of the data and clean up your dataset by changing appropriate variables to factor and date types and getting rid of any columns not needed. Show the summary of your data to be sure there is no missing data. If there is missing data, describe how you plan to handle it.
+
+Perpetrators and victims with incorrectly labeled or missing details are categorized as 'UNKNOWN'.
+
+NA, null, and empty values in LOC_CLASSFCTN_DESC, LOCATION_DESC, and LOC_OF_OCCUR_DESC are grouped under 'OTHER'.
+
+Numerical features JURISDICTION_CODE and PRECINCT, due to having only two entries, are removed.
+
+<br>
+
+
+```{r reduce fs}
+removed_fs <- c("INCIDENT_KEY", "X_COORD_CD", "Y_COORD_CD", 
+                "Latitude", "Longitude", "Lon_Lat")
+data <- data %>%
+        select(setdiff(colnames(data), removed_fs))
+colnames(data)
+```
+
+### Murder Flag
+
+```{r murder flag}
+data <- data %>%
+        mutate(STATISTICAL_MURDER_FLAG = as.logical(STATISTICAL_MURDER_FLAG))
+```
+
+### Occur Date
+
+```{r occur date}
+str(data$OCCUR_DATE)
+data$OCCUR_DATE <- as.Date(data$OCCUR_DATE, format = "%m/%d/%Y")
+str(data$OCCUR_DATE)
+min(data$OCCUR_DATE)
+max(data$OCCUR_DATE)
+
+data_yearly <- data %>%
+               mutate(year = format(OCCUR_DATE, "%Y"),
+                      #STATISTICAL_MURDER_FLAG = as.logical(STATISTICAL_MURDER_FLAG)
+                      ) %>%
+               group_by(year, STATISTICAL_MURDER_FLAG) %>%
+               summarise(count = n(), .groups = 'drop') %>%
+               group_by(year) %>%
+               mutate(total = sum(count),
+                      percent_true = sum(count[STATISTICAL_MURDER_FLAG == TRUE]) / total)
+
+bar_data <- data_yearly %>%
+            select(year, STATISTICAL_MURDER_FLAG, count)
+line_data <- data_yearly %>%
+             select(year, percent_true) %>%
+             distinct()
+
+ggplot() +
+geom_col(data = bar_data, aes(x = year, 
+                              y = count, 
+                              fill = as.factor(STATISTICAL_MURDER_FLAG)), 
+         position = "stack") +
+geom_line(data = line_data, aes(x = year, 
+                                y = percent_true * max(data_yearly$total) / 0.5), 
+          group = 1, 
+          color = "darkgreen", 
+          linewidth = 1.5) +
+scale_y_continuous(name = "Total Count",
+                   sec.axis = sec_axis(~ . * 0.5 / max(data_yearly$total), 
+                                       name = "Percentage of True (%)", 
+                                       labels = scales::percent)) +
+labs(title = 'Annual Crime Count by Murder Flag',
+     x = 'Year',
+     y = 'Total Count',
+     fill = 'Murder Flag') +
+scale_fill_manual(values = c("TRUE" = "darkred", "FALSE" = "steelblue")) +
+theme(legend.position = "top",legend.title.align = 0.5)
+```
+
+The trend of shooting incidents gradually declined from 2006 to 2019, but saw a sudden increase in 2020 and 2021 during the COVID-19 period, only easing in 2023.
+
+### Occur Time
+```{r occur time}
+data_hourly <- data %>%
+               mutate(hour = as.numeric(substr(OCCUR_TIME, 1, 2)),
+                      #STATISTICAL_MURDER_FLAG = as.logical(STATISTICAL_MURDER_FLAG)
+                      ) %>%
+               group_by(hour, STATISTICAL_MURDER_FLAG) %>%
+               summarise(count = n(), .groups = 'drop') %>%
+               group_by(hour) %>%
+               mutate(total = sum(count))
+
+total_murder_true <- sum(data_hourly$count[data_hourly$STATISTICAL_MURDER_FLAG == TRUE])
+
+bar_data <- data_hourly %>%
+            mutate(percent_of_all_true = if_else(STATISTICAL_MURDER_FLAG, 
+                                                 count / total_murder_true * 100, NA_real_)) %>%
+            select(hour, STATISTICAL_MURDER_FLAG, count, total, percent_of_all_true)
+
+ggplot(bar_data, aes(x = hour, y = count, fill = as.factor(STATISTICAL_MURDER_FLAG))) +
+geom_col(position = "stack") +
+geom_text(aes(y = total + 20,
+              label = ifelse(!is.na(percent_of_all_true), sprintf("%.1f%%", percent_of_all_true), "")), 
+              vjust = 0, size = 2.4) +
+scale_y_continuous(name = "Total Count") +
+labs(title = 'Hourly Crime Occurrence Count by Murder Flag',
+     x = 'Hour of Day',
+     y = 'Total Count',
+     fill = 'Murder Flag', 
+     caption = "The percentage represents the proportion of true murder cases for the given hour out of all true cases across all times.") +
+scale_fill_manual(values = c("TRUE" = "darkred", "FALSE" = "steelblue")) +
+theme(legend.position = "top", legend.title.align = 0.5, plot.caption = element_text(hjust = 0.5))
+```
+
+Based on the hourly shooting case count, the occurrence rate is lowest in the morning, gradually rises in the afternoon, peaks at midnight, and then starts to ease before dawn.
+
+
+### Unique Values
+```{r unique values}
+cols <- setdiff(colnames(data), c("OCCUR_DATE", "OCCUR_TIME"))
+
+for (col in cols) {
+  # cat("Unique values in column:", col, "\n")
+  # print(unique(data[[col]]))
+  cat("Counts for each category in column:", col, "\n")
+  print(table(data[[col]]))
+  cat("\n") 
+}
+
+```
+
+### Borough
+
+```{r boro}
+data$BORO <- as.factor(data$BORO)
+data$STATISTICAL_MURDER_FLAG <- as.logical(data$STATISTICAL_MURDER_FLAG)
+
+boro_data <- data %>%
+             group_by(BORO, STATISTICAL_MURDER_FLAG) %>%
+             summarise(count = n(), .groups = 'drop') %>%
+             group_by(BORO) %>%
+             mutate(pct = count / sum(count) * 100)
+
+ggplot(boro_data, aes(x = BORO, y = count, fill = as.factor(STATISTICAL_MURDER_FLAG))) +
+geom_col(position = "stack") +
+geom_text(aes(label = sprintf("%.1f%%", pct)), 
+          position = position_stack(vjust = 0.5), size = 2.6) +
+scale_y_continuous(name = "Total Count") +
+labs(title = 'Number of Incidents by Borough with Murder Flag',
+     x = 'Borough',
+     y = 'Count',
+     fill = 'Murder Flag') +
+scale_fill_manual(values = c("TRUE" = "darkred", "FALSE" = "steelblue")) +
+theme(legend.position = "top", legend.title.align = 0.5)
+```
+
+### Perpetrator
+```{r perp}
+# categorize values that are incorrectly labeled or missing as 'unknown'
+data$PERP_AGE_GROUP <- ifelse(data$PERP_AGE_GROUP %in% c("<18", "18-24", "25-44", "45-64", "65+"), 
+                              data$PERP_AGE_GROUP, "UNKNOWN")
+data$PERP_SEX <- ifelse(data$PERP_SEX %in% c("M", "F"), data$PERP_SEX, "UNKNOWN")
+data$PERP_RACE <- ifelse(data$PERP_RACE %in% c("AMERICAN INDIAN/ALASKAN NATIVE", "ASIAN / PACIFIC ISLANDER", 
+                                                "BLACK", "BLACK HISPANIC", "WHITE", "WHITE HISPANIC"), 
+                          data$PERP_RACE, "UNKNOWN")
+
+ggplot(data, aes(x = PERP_AGE_GROUP, fill = PERP_RACE)) +
+    geom_bar(position = "dodge") +
+    facet_wrap(~ PERP_SEX) +
+    labs(title = "Distribution of Perpetrator Age Group by Gender and Race",
+         x = "Perpetrator Age Group",
+         y = "Count",
+         fill = "Perpetrator Race") +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+    theme(legend.position = c(0.005, 0.99), 
+          legend.justification = c(0, 1), 
+          legend.text = element_text(size = 8)) 
+
+filtered_data <- data %>% filter(PERP_SEX == "M")
+
+ggplot(filtered_data, aes(x = PERP_AGE_GROUP, fill = PERP_RACE)) +
+    geom_bar(position = "dodge") +
+    labs(title = "Distribution of Perpetrator Age Group by Race (Males Only)",
+         x = "Perpetrator Age Group",
+         y = "Count",
+         fill = "Perpetrator Race") +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+    theme(legend.position = c(0.99, 0.99),
+          legend.justification = c(1, 1),   
+          legend.text = element_text(size = 8),
+          panel.grid.major.x = element_blank(), 
+          panel.spacing = unit(1, "lines"))  
+```
+
+<br>
+
+**Project Step 3: Add Visualizations and Analysis** <br> Add at least two different visualizations & some analysis to your Rmd. Does this raise additional questions that you should investigate?
+
+After visualizing the distribution of perpetrator age group by gender and race, it is clear that a significant proportion of perpetrators have unknown gender and age.
+
+Calculations show that 42% of the data have both age and gender unknown, 6% have one unknown, and 52% have both known. Among the known data, the number of male perpetrators is 36 times that of female perpetrators.
+
+<br>
+
+```{r perp pct}
+unknown_sex <- data$PERP_SEX == 'UNKNOWN'
+unknown_age <- data$PERP_AGE_GROUP == 'UNKNOWN'
+
+unknown_both_count <- sum(unknown_sex & unknown_age)
+unknown_any_count <- sum(unknown_sex | unknown_age) - unknown_both_count
+known_both_count <- nrow(data) - unknown_any_count - unknown_both_count
+
+total_count <- nrow(data)
+unknown_both_pct <- unknown_both_count / total_count
+unknown_any_pct <- unknown_any_count / total_count
+known_both_pct <- known_both_count / total_count
+
+unknown_both_pct
+unknown_any_pct
+known_both_pct
+
+sex_counts <- table(data$PERP_SEX)
+sex_ratio <- sex_counts['M'] / sex_counts['F']
+sex_ratio
+```
+
+### Victim
+```{r vic}
+# categorize values that are incorrectly labeled or missing as 'unknown'
+data$VIC_AGE_GROUP <- ifelse(data$VIC_AGE_GROUP %in% c("<18", "18-24", "25-44", "45-64", "65+"), 
+                              data$VIC_AGE_GROUP, "UNKNOWN")
+data$VIC_SEX <- ifelse(data$VIC_SEX %in% c("M", "F"), data$VIC_SEX, "UNKNOWN")
+data$VIC_RACE <- ifelse(data$VIC_RACE %in% c("AMERICAN INDIAN/ALASKAN NATIVE", "ASIAN / PACIFIC ISLANDER", 
+                                              "BLACK", "BLACK HISPANIC", "WHITE", "WHITE HISPANIC"), 
+                          data$VIC_RACE, "UNKNOWN")
+
+ggplot(data, aes(x = VIC_AGE_GROUP, fill = VIC_RACE)) +
+    geom_bar(position = "dodge") +
+    facet_wrap(~ VIC_SEX) +
+    labs(title = "Distribution of Victim Age Group by Gender and Race",
+         x = "Victim Age Group",
+         y = "Count",
+         fill = "Victim Race") +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+    theme(legend.position = c(0.61, 0.99), 
+          legend.justification = c(0, 1), 
+          legend.text = element_text(size = 8)) 
+
+filtered_data <- data %>% filter(VIC_SEX == "M")
+
+ggplot(filtered_data, aes(x = VIC_AGE_GROUP, fill = VIC_RACE)) +
+    geom_bar(position = "dodge") +
+    labs(title = "Distribution of Victim Age Group by Race (Males Only)",
+         x = "Victim Age Group",
+         y = "Count",
+         fill = "Victim Race") +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+    theme(legend.position = c(0.99, 0.99),
+          legend.justification = c(1, 1),   
+          legend.text = element_text(size = 8),
+          panel.grid.major.x = element_blank(), 
+          panel.spacing = unit(1, "lines"))  
+```
+
+Comparred to prepetrators, there are very few victims with unknown gender and age.
+
+<br>
+
+**Project Step 4: Add Bias Identification** <br> Write the conclusion to your project report and include any possible sources of bias. Be sure to identify what your personal bias might be and how you have mitigated that.
+
+I thought there would be more female victims, or the numbers would be about even, but the data shows more male victims. To reduce bias: the data indicates that conflicts among males lead to more shooting cases. My initial bias didn't influence the model building.
+
+<br>
+
+### Other Features
+
+```{r other fs}
+# NA, null, and empty values 
+# in LOC_CLASSFCTN_DESC, LOCATION_DESC, and LOC_OF_OCCUR_DESC 
+# are grouped under 'OTHER'.
+# NA in numerical features JURISDICTION_CODE and PRECINCT are removed.
+
+data <- data %>%
+        mutate(hour = as.numeric(substr(OCCUR_TIME, 1, 2)),
+               across(c(LOC_CLASSFCTN_DESC, LOCATION_DESC, LOC_OF_OCCUR_DESC), 
+                      ~ case_when(is.na(.) ~ "OTHER",     
+                                  . == "null" ~ "OTHER",     
+                                  . == "" ~ "OTHER",        
+                                  TRUE ~ .))) %>%
+        filter(!is.na(JURISDICTION_CODE), !is.na(PRECINCT)) %>%
+        select(-c(OCCUR_DATE, OCCUR_TIME, JURISDICTION_CODE)) %>%
+        mutate(across(c(LOC_CLASSFCTN_DESC, LOCATION_DESC, LOC_OF_OCCUR_DESC), factor))
+
+summary(data)
+```
+
+## Baseline Models
+
+### Data Partition
+
+```{r data partition}
+data$STATISTICAL_MURDER_FLAG <- as.factor(data$STATISTICAL_MURDER_FLAG)
+## Oversampling
+data <- ovun.sample(STATISTICAL_MURDER_FLAG ~ ., data = data, method = "over", N = 30000)$data
+
+SEED = 2004
+set.seed(SEED)
+training_idx <- createDataPartition(data$STATISTICAL_MURDER_FLAG, p = 0.85, list = FALSE)
+train_data <- data[training_idx, ]
+test_data <- data[-training_idx, ]
+```
+
+### Weights
+
+Calculate and apply weights to reduce the impact of imbalanced datasets when training the model.
+
+```{r weights}
+class_weights <- nrow(train_data) / table(train_data$STATISTICAL_MURDER_FLAG)
+class_weights <- class_weights / min(class_weights)
+
+sample_weights <- rep(1, nrow(train_data))
+sample_weights[train_data$STATISTICAL_MURDER_FLAG == "TRUE"] <- class_weights["TRUE"]
+```
+
+### Decision Tree
+
+```{r dt}
+dt_model <- rpart(STATISTICAL_MURDER_FLAG ~ ., 
+                  data = train_data, 
+                  weights = sample_weights, 
+                  method = "class")
+```
+
+### Random Forest
+
+```{r rf}
+rf_model <- randomForest(STATISTICAL_MURDER_FLAG ~ ., 
+                         data = train_data, 
+                         ntree = 500, 
+                         weights = sample_weights, 
+                         seed = SEED)
+```
+
+### XGBoost
+
+```{r xgb}
+dummies <- dummyVars(STATISTICAL_MURDER_FLAG ~ ., data = train_data)
+train_data_dummy <- predict(dummies, newdata = train_data)
+test_data_dummy <- predict(dummies, newdata = test_data)
+
+train_weights <- ifelse(train_data$STATISTICAL_MURDER_FLAG == "TRUE", class_weights["TRUE"], 1)
+
+xgb_train <- xgb.DMatrix(data = as.matrix(train_data_dummy), label = as.numeric(train_data$STATISTICAL_MURDER_FLAG) - 1, weight = train_weights)
+xgb_test <- xgb.DMatrix(data = as.matrix(test_data_dummy))
+
+xgb_model <- xgboost(data = xgb_train, 
+                     max_depth = 6, 
+                     eta = 0.3, 
+                     nrounds = 500, 
+                     objective = "binary:logistic", 
+                     eval_metric = "auc", 
+                     verbose=0, 
+                     seed=SEED)
+```
+
+### Prediction
+
+```{r pred}
+dt_pred_prob <- predict(dt_model, test_data, type = "prob")[, "TRUE"]
+rf_pred_prob <- predict(rf_model, test_data, type = "prob")[, "TRUE"]
+xgb_pred_prob <- predict(xgb_model, xgb_test)
+
+rf_pred <- as.factor(ifelse(rf_pred_prob > 0.5, "TRUE", "FALSE"))
+dt_pred <- as.factor(ifelse(dt_pred_prob > 0.5, "TRUE", "FALSE"))
+xgb_pred <- as.factor(ifelse(xgb_pred_prob > 0.5, "TRUE", "FALSE"))
+```
+
+## Evaluation
+
+### ROC Curves, AUC
+
+```{r roc auc}
+rf_roc_curve <- roc(response = test_data$STATISTICAL_MURDER_FLAG, predictor = rf_pred_prob)
+dt_roc_curve <- roc(response = test_data$STATISTICAL_MURDER_FLAG, predictor = dt_pred_prob)
+xgb_roc_curve <- roc(response = test_data$STATISTICAL_MURDER_FLAG, predictor = xgb_pred_prob)
+
+rf_auc <- auc(rf_roc_curve)
+dt_auc <- auc(dt_roc_curve)
+xgb_auc <- auc(xgb_roc_curve)
+
+plot(rf_roc_curve, main = "ROC Curves", col = "red")
+lines(dt_roc_curve, col = "blue")
+lines(xgb_roc_curve, col = "green")
+legend("bottomright", legend = c(paste("XGBoost AUC =", round(xgb_auc, 2)),
+                      paste("Random Forest AUC =", round(rf_auc, 2)),
+                                paste("Decision Tree AUC =", round(dt_auc, 2))
+                                ),
+       col = c("red", "blue", "green"), lty = 1)
+```
+
+The ROC curves show that XGBoost and Random Forest perform better than the Decision Tree.
+
+### Confusion Matrix
+
+```{r cm}
+dt_conf_matrix <- confusionMatrix(dt_pred, as.factor(test_data$STATISTICAL_MURDER_FLAG))
+rf_conf_matrix <- confusionMatrix(rf_pred, as.factor(test_data$STATISTICAL_MURDER_FLAG))
+xgb_conf_matrix <- confusionMatrix(xgb_pred, as.factor(test_data$STATISTICAL_MURDER_FLAG))
+
+print(dt_conf_matrix)
+print(rf_conf_matrix)
+print(xgb_conf_matrix)
+```
+
+## Brief Summary
+
+- The trend of shooting incidents gradually declined from 2006 to 2019, but saw a sudden increase in 2020 and 2021 during the COVID-19 period, only easing in 2023.
+
+- Based on the hourly shooting case count, the occurrence rate is lowest in the morning, gradually rises in the afternoon, peaks at midnight, and then starts to ease before dawn.
+
+- From the distribution of perpetrator age group by gender and race, there is a significant proportion of perpetrators have unknown gender and age.
+
+- 42% of the data have both age and gender unknown, 6% have one unknown, and 52% have both known. Among the known data, the number of male perpetrators is 36 times that of female perpetrators. 
+
+- Comparred to prepetrators, there are very few victims with unknown gender and age.
+
+- Using oversampling and calculating weights to reduce the impact of imbalanced datasets when training the model.
+
+- Based on the ROC curves, AUC and confusion matrix, XGBoost and Random Forest perform better than the Decision Tree.
+
+- Despite balancing the data, the confusion matrix results show that the detection of the minority class in the target can still be improved.
+
+- Further feature engineering and model fine-tuning can be explored for optimization.
+
+<br>
